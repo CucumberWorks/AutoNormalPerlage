@@ -9,6 +9,7 @@ import time
 import sys
 import shutil
 import math
+import cv2  # OpenCV for faster image processing
 
 # Constants
 DEFAULT_SIZE = 512
@@ -19,7 +20,9 @@ DEFAULT_MATCAP_ROTATION = 0  # degrees
 DEFAULT_SEGMENTS = 1  # Default to standard cone (no segments)
 DEFAULT_SEGMENT_RATIO = 50  # Default to equal out-in ratio (50% out, 50% in)
 FAST_PREVIEW_SCALE = 0.25  # Scale factor for fast preview (lower = faster)
+DRAG_PREVIEW_SCALE = 0.15  # Even smaller scale during slider dragging
 AUTO_REFRESH_DELAY = 300  # Delay in ms before auto-refreshing to avoid too frequent updates
+SLIDER_DRAG_DELAY = 500  # Longer delay during slider dragging for better performance
 
 # Folder paths
 TEMP_FOLDER = "temp"
@@ -162,12 +165,14 @@ class ConeNormalMapGenerator:
         else:
             return Image.fromarray(matcap_result)
 
-    def create_cone_height_map(self, fast_preview=False):
+    def create_cone_height_map(self, fast_preview=False, drag_preview=False):
         """Create a height map of a cone shape with optional segmentation."""
         # If in fast preview mode, use a smaller size
         actual_size = self.size
         if fast_preview and self.use_fast_preview:
-            actual_size = max(int(self.size * FAST_PREVIEW_SCALE), 128)
+            # Use an even smaller size during dragging for better performance
+            preview_scale = DRAG_PREVIEW_SCALE if drag_preview else FAST_PREVIEW_SCALE
+            actual_size = max(int(self.size * preview_scale), 64)  # Minimum size of 64px
             
             # Check if we can reuse the cached preview
             if self.preview_size_cache == (actual_size, self.radius_percent, self.height, self.segments, self.segment_ratio):
@@ -242,41 +247,41 @@ class ConeNormalMapGenerator:
         return height_map
 
     def height_map_to_normal_map(self, height_map):
-        """Convert a height map to a normal map."""
+        """Convert a height map to a normal map using OpenCV for faster processing."""
         # Get the dimensions of the height map
         height, width = height_map.shape
         
         # Scale strength based on resolution for consistent results between different sizes
         # Using DEFAULT_SIZE as the reference size - we need to increase strength for higher resolutions
-        resolution_scale = max(width, height) / DEFAULT_SIZE  # Invert the ratio to properly scale up for higher resolutions
+        resolution_scale = max(width, height) / DEFAULT_SIZE
         adjusted_strength = self.strength * resolution_scale
         
-        # Create an empty normal map
-        normal_map = np.zeros((height, width, 3), dtype=np.uint8)
+        # Define Sobel kernels
+        kernel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]) * adjusted_strength
+        kernel_y = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]]) * adjusted_strength
         
-        # Calculate gradients using Sobel operators - Use scipy's optimized operators
-        # This is much faster than manual convolution
-        dx = convolve(height_map, np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]) * adjusted_strength)
-        dy = convolve(height_map, np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]]) * adjusted_strength)
+        # Use OpenCV's filter2D for faster convolution (much faster than scipy.ndimage.convolve)
+        # Convert height_map to float32 for better precision in OpenCV operations
+        height_map_float = height_map.astype(np.float32)
+        dx = cv2.filter2D(height_map_float, -1, kernel_x)
+        dy = cv2.filter2D(height_map_float, -1, kernel_y)
         
-        # Calculate normal vectors (vectorized operations for speed)
-        z = np.ones_like(dx) * 1.0
+        # Prepare normal vector components
+        z = np.ones_like(dx)
         
-        # Compute normal length once for all components
-        normal_length = np.sqrt(dx**2 + dy**2 + z**2)
+        # Stack the components for vectorized operations
+        normal_vectors = np.stack([dx, dy, z], axis=-1)
         
         # Normalize to get unit vectors (vectorized)
-        dx_normalized = dx / normal_length
-        dy_normalized = dy / normal_length
-        z_normalized = z / normal_length
+        # Add small epsilon to avoid division by zero
+        normal_length = np.sqrt(np.sum(normal_vectors**2, axis=2, keepdims=True)) + 1e-10
+        normal_vectors_normalized = normal_vectors / normal_length
         
-        # Map normal vectors to RGB (vectorized)
-        # Remap from [-1, 1] to [0, 255]
-        normal_map[..., 0] = (dx_normalized * 0.5 + 0.5) * 255  # Red channel (X)
-        normal_map[..., 1] = (dy_normalized * 0.5 + 0.5) * 255  # Green channel (Y)
-        normal_map[..., 2] = (z_normalized * 0.5 + 0.5) * 255   # Blue channel (Z)
+        # Map from [-1,1] to [0,255] range for RGB
+        normal_map = ((normal_vectors_normalized * 0.5) + 0.5) * 255
         
-        return normal_map
+        # Convert to uint8 for image
+        return normal_map.astype(np.uint8)
 
     def generate_maps(self, update_callback=None):
         """Generate both height map and normal map with optional UI callback."""
@@ -452,7 +457,7 @@ class ConeNormalMapGenerator:
             print(f"Error saving images: {str(e)}")
             return None, None
 
-    def quick_update_preview(self, update_callback=None):
+    def quick_update_preview(self, update_callback=None, is_dragging=False):
         """Update the preview based on current parameters without regenerating the full height map."""
         if self.height_map is None and self.preview_height_map is None:
             # If we have no existing height map, generate from scratch
@@ -466,10 +471,13 @@ class ConeNormalMapGenerator:
                 update_callback()
             
             try:
+                # Use an even smaller scale during dragging for better responsiveness
+                preview_scale = DRAG_PREVIEW_SCALE if is_dragging else FAST_PREVIEW_SCALE
+                
                 # Create a faster, lower-resolution height map for interactive preview
                 # Only use fast preview if the user has enabled it
                 use_fast = self.use_fast_preview
-                fast_height_map = self.create_cone_height_map(fast_preview=use_fast)
+                fast_height_map = self.create_cone_height_map(fast_preview=use_fast, drag_preview=is_dragging)
                 
                 # Update the height image from the height map
                 if fast_height_map is not None:
@@ -559,6 +567,9 @@ class ConeNormalMapApp:
         self.normal_preview = None
         self.matcap_preview = None
         self.matcap_texture_preview = None
+        
+        # UI state tracking
+        self.slider_dragging = False
         
         # Update periodically
         self.root.after(100, self.periodic_update)
@@ -963,6 +974,9 @@ class ConeNormalMapApp:
         radius = round(self.radius_var.get())
         self.generator.radius_percent = radius
         
+        # Set dragging state while slider is being adjusted
+        self.slider_dragging = True
+        
         # Schedule preview update
         self.schedule_preview_update()
     
@@ -975,6 +989,9 @@ class ConeNormalMapApp:
             self.radius_var.set(diameter)
             self.generator.radius_percent = diameter
             
+            # Not dragging when manually entering a value
+            self.slider_dragging = False
+            
             # Schedule preview update
             self.schedule_preview_update()
         except ValueError:
@@ -985,6 +1002,9 @@ class ConeNormalMapApp:
         """Handle change in height slider."""
         height = round(self.height_var.get(), 1)
         self.generator.height = height
+        
+        # Set dragging state
+        self.slider_dragging = True
         
         # Schedule preview update
         self.schedule_preview_update()
@@ -998,6 +1018,9 @@ class ConeNormalMapApp:
             self.height_var.set(round(height, 1))
             self.generator.height = height
             
+            # Not dragging when manually entering a value
+            self.slider_dragging = False
+            
             # Schedule preview update
             self.schedule_preview_update()
         except ValueError:
@@ -1008,6 +1031,9 @@ class ConeNormalMapApp:
         """Handle change in strength slider."""
         strength = round(self.strength_var.get(), 1)
         self.generator.strength = strength
+        
+        # Set dragging state
+        self.slider_dragging = True
         
         # Schedule preview update
         self.schedule_preview_update()
@@ -1021,6 +1047,9 @@ class ConeNormalMapApp:
             self.strength_var.set(round(strength, 1))
             self.generator.strength = strength
             
+            # Not dragging when manually entering a value
+            self.slider_dragging = False
+            
             # Schedule preview update
             self.schedule_preview_update()
         except ValueError:
@@ -1033,6 +1062,9 @@ class ConeNormalMapApp:
         segments = int(self.segments_var.get())
         self.segments_var.set(segments)  # Force integer in the UI
         self.generator.segments = segments
+        
+        # Set dragging state
+        self.slider_dragging = True
         
         # For segment changes, we need to clear the preview cache
         # to force a full regeneration of the height map
@@ -1051,6 +1083,9 @@ class ConeNormalMapApp:
             self.segments_var.set(segments)
             self.generator.segments = segments
             
+            # Not dragging when manually entering a value
+            self.slider_dragging = False
+            
             # For segment changes, we need to clear the preview cache
             # to force a full regeneration of the height map
             self.generator.preview_size_cache = None
@@ -1067,6 +1102,9 @@ class ConeNormalMapApp:
         ratio = int(self.segment_ratio_var.get())
         self.generator.segment_ratio = ratio
         
+        # Set dragging state
+        self.slider_dragging = True
+        
         # Schedule preview update
         self.schedule_preview_update()
     
@@ -1078,6 +1116,9 @@ class ConeNormalMapApp:
             ratio = max(10, min(90, ratio))
             self.segment_ratio_var.set(ratio)
             self.generator.segment_ratio = ratio
+            
+            # Not dragging when manually entering a value
+            self.slider_dragging = False
             
             # Schedule preview update
             self.schedule_preview_update()
@@ -1406,13 +1447,23 @@ class ConeNormalMapApp:
         if self.update_timer is not None:
             self.root.after_cancel(self.update_timer)
         
+        # Use longer delay during slider dragging for better performance
+        delay = SLIDER_DRAG_DELAY if self.slider_dragging else AUTO_REFRESH_DELAY
+        
         # Create a new timer
-        self.update_timer = self.root.after(AUTO_REFRESH_DELAY, self.on_delayed_update)
+        self.update_timer = self.root.after(delay, self.on_delayed_update)
     
     def on_delayed_update(self):
         """Called after delay to update preview."""
         if not self.generator.generation_in_progress:
-            self.generator.quick_update_preview(self.update_ui)
+            # Pass the slider_dragging flag to use appropriate preview scaling
+            self.generator.quick_update_preview(
+                update_callback=self.update_ui,
+                is_dragging=self.slider_dragging
+            )
+            
+        # Reset the dragging flag after update
+        self.slider_dragging = False
 
 def main():
     """Main entry point."""
