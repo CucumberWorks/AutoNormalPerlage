@@ -17,6 +17,7 @@ DEFAULT_STRENGTH = 5.0
 DEFAULT_DIAMETER = 80  # as percentage of image size (previously DEFAULT_RADIUS = 40)
 DEFAULT_MATCAP_ROTATION = 0  # degrees
 DEFAULT_SEGMENTS = 1  # Default to standard cone (no segments)
+DEFAULT_SEGMENT_RATIO = 50  # Default to equal out-in ratio (50% out, 50% in)
 FAST_PREVIEW_SCALE = 0.25  # Scale factor for fast preview (lower = faster)
 AUTO_REFRESH_DELAY = 300  # Delay in ms before auto-refreshing to avoid too frequent updates
 
@@ -44,6 +45,7 @@ class ConeNormalMapGenerator:
         self.radius_percent = DEFAULT_DIAMETER  # Keeping variable name for compatibility, but using diameter value
         self.matcap_rotation = DEFAULT_MATCAP_ROTATION
         self.segments = DEFAULT_SEGMENTS
+        self.segment_ratio = DEFAULT_SEGMENT_RATIO
         self.use_fast_preview = True
         
         self.height_map = None
@@ -168,7 +170,7 @@ class ConeNormalMapGenerator:
             actual_size = max(int(self.size * FAST_PREVIEW_SCALE), 128)
             
             # Check if we can reuse the cached preview
-            if self.preview_size_cache == (actual_size, self.radius_percent, self.height, self.segments):
+            if self.preview_size_cache == (actual_size, self.radius_percent, self.height, self.segments, self.segment_ratio):
                 return self.preview_height_map
             
         size = actual_size
@@ -180,6 +182,7 @@ class ConeNormalMapGenerator:
         
         height = self.height
         segments = self.segments
+        segment_ratio = self.segment_ratio / 100.0  # Convert from percentage (0-100) to fraction (0-1)
         
         # Create a grid of coordinates
         y, x = np.ogrid[:size, :size]
@@ -191,27 +194,49 @@ class ConeNormalMapGenerator:
             # Create the standard cone shape (height decreases linearly with distance)
             height_map = np.maximum(0, height * (1.0 - dist_from_center / radius))
         else:
-            # Create a segmented cone with alternating in/out rings
+            # Create a segmented cone with alternating in/out rings using straight lines
             # Normalize distance to be 0 to 1 within the radius
             normalized_dist = np.clip(dist_from_center / radius, 0, 1)
             
-            # Scale the distance based on number of segments (multiply by π × segments)
-            scaled_dist = normalized_dist * np.pi * segments
+            # Calculate the segment period
+            segment_period = 1.0 / segments
             
-            # Use cosine to create alternating rings (cosine oscillates between -1 and 1)
-            # We want the center to start with positive height (going out) for odd segments
-            # and negative height (going in) for even segments
-            oscillation = np.cos(scaled_dist)
+            # Calculate position within the segment cycle (0 to 1 for each complete segment)
+            # Each segment is divided into "out" and "in" portions
+            segment_pos = (normalized_dist * segments) % 1.0
             
-            # Apply height and ensure we fade to 0 at the edges
-            height_map = height * oscillation * (1.0 - normalized_dist)
+            # Create straight line segments with adjustable ratio
+            # segment_ratio determines what portion of the cycle is "out" (rising) vs "in" (falling)
+            # For segment_ratio = 0.5 (50%), we get equal up/down slopes
+            # For segment_ratio = 0.7 (70%), we get longer up slopes and shorter down slopes
+            height_map = np.zeros_like(normalized_dist)
+            
+            # Calculate which pixels are in the up-slope (out) portion
+            up_mask = segment_pos < segment_ratio
+            # Calculate which pixels are in the down-slope (in) portion
+            down_mask = ~up_mask
+            
+            # For up-slope: height increases linearly from 0 to 1 over segment_ratio portion of the segment
+            # Normalized position within the up-slope: 0 to 1
+            up_pos = segment_pos / segment_ratio
+            
+            # For down-slope: height decreases linearly from 1 to 0 over (1-segment_ratio) portion of the segment
+            # Normalized position within the down-slope: 0 to 1
+            down_pos = (segment_pos - segment_ratio) / (1.0 - segment_ratio)
+            
+            # Apply the height values
+            height_map[up_mask] = up_pos[up_mask]
+            height_map[down_mask] = 1.0 - down_pos[down_mask]
+            
+            # Fade out to 0 at the edges
+            height_map = height * height_map * (1.0 - normalized_dist)
             
             # Set values outside the radius to 0
             height_map[normalized_dist >= 1.0] = 0
         
         # Cache for fast preview mode
         if fast_preview and self.use_fast_preview:
-            self.preview_size_cache = (actual_size, self.radius_percent, self.height, self.segments)
+            self.preview_size_cache = (actual_size, self.radius_percent, self.height, self.segments, self.segment_ratio)
             self.preview_height_map = height_map
         
         return height_map
@@ -737,6 +762,25 @@ class ConeNormalMapApp:
         segments_entry.bind("<Return>", lambda e: self.on_segments_entry_change())
         segments_entry.bind("<FocusOut>", lambda e: self.on_segments_entry_change())
         
+        # Segment ratio slider with input (new control)
+        segment_ratio_frame = ttk.Frame(parameters_frame)
+        segment_ratio_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(segment_ratio_frame, text="Segment Ratio (% Out):").pack(anchor=tk.W, padx=5)
+        
+        # Add a frame for the slider and input
+        segment_ratio_control_frame = ttk.Frame(segment_ratio_frame)
+        segment_ratio_control_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.segment_ratio_var = tk.IntVar(value=DEFAULT_SEGMENT_RATIO)
+        segment_ratio_slider = ttk.Scale(segment_ratio_control_frame, from_=10, to=90, variable=self.segment_ratio_var, command=self.on_segment_ratio_change)
+        segment_ratio_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # Add number input
+        segment_ratio_entry = ttk.Entry(segment_ratio_control_frame, textvariable=self.segment_ratio_var, width=5, validate="key", validatecommand=(validate_int, '%P'))
+        segment_ratio_entry.pack(side=tk.RIGHT, padx=5)
+        segment_ratio_entry.bind("<Return>", lambda e: self.on_segment_ratio_entry_change())
+        segment_ratio_entry.bind("<FocusOut>", lambda e: self.on_segment_ratio_entry_change())
+        
         # Matcap section
         matcap_frame = ttk.Frame(parameters_frame)
         matcap_frame.pack(fill=tk.X, pady=10)
@@ -1017,6 +1061,29 @@ class ConeNormalMapApp:
         except ValueError:
             # Reset to last valid value
             self.segments_var.set(self.generator.segments)
+    
+    def on_segment_ratio_change(self, event=None):
+        """Handle change in segment ratio slider."""
+        ratio = int(self.segment_ratio_var.get())
+        self.generator.segment_ratio = ratio
+        
+        # Schedule preview update
+        self.schedule_preview_update()
+    
+    def on_segment_ratio_entry_change(self):
+        """Handle direct input in segment ratio entry."""
+        try:
+            ratio = int(self.segment_ratio_var.get())
+            # Constrain to valid range (10-90)
+            ratio = max(10, min(90, ratio))
+            self.segment_ratio_var.set(ratio)
+            self.generator.segment_ratio = ratio
+            
+            # Schedule preview update
+            self.schedule_preview_update()
+        except ValueError:
+            # Reset to last valid value
+            self.segment_ratio_var.set(self.generator.segment_ratio)
     
     def on_rotation_change(self, event=None):
         """Handle change in matcap rotation slider."""
