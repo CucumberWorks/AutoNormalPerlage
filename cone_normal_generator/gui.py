@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk, ImageDraw
 import math
+import glob
 
 from cone_normal_generator.config import (
     DEFAULT_SIZE, DEFAULT_DIAMETER, DEFAULT_HEIGHT, DEFAULT_STRENGTH,
@@ -47,6 +48,14 @@ class ConeNormalMapApp:
         self.use_full_resolution_stacked = False  # Track whether to use full resolution for stacked previews
         self.height_rotation_var = None  # Will be initialized in create_additional_tab_content
         
+        # Matcap variables
+        self.matcap_files = []
+        self.matcap_var = tk.StringVar()
+        self.stacked_matcap_var = tk.StringVar()
+        
+        # Load available matcaps
+        self.load_available_matcaps()
+        
         # Create UI elements
         self.create_gui()
         
@@ -61,6 +70,89 @@ class ConeNormalMapApp:
         
         # When closing the app, clean up temp files
         root.protocol("WM_DELETE_WINDOW", self.on_closing)
+    
+    def load_available_matcaps(self):
+        """Load available matcap textures from assets folder."""
+        # Define matcap directory
+        matcap_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "matcaps")
+        
+        # Ensure the directory exists
+        os.makedirs(matcap_dir, exist_ok=True)
+        
+        # Find all png files in the matcaps directory
+        matcap_files = glob.glob(os.path.join(matcap_dir, "*.png"))
+        
+        # Extract just the filenames without paths for display
+        self.matcap_files = [os.path.basename(f) for f in matcap_files]
+        
+        # Default to a basic matcap if none found
+        if not self.matcap_files:
+            print("No matcap files found in assets/matcaps directory")
+            # The application will fall back to the default matcap in the core
+        else:
+            # Set initial value for both tabs
+            self.matcap_var.set(self.matcap_files[0])
+            self.stacked_matcap_var.set(self.matcap_files[0])
+            print(f"Loaded {len(self.matcap_files)} matcap files from assets/matcaps directory")
+    
+    def on_matcap_selected(self, event=None):
+        """Handle matcap selection change in the first tab."""
+        selected_matcap = self.matcap_var.get()
+        if not selected_matcap:
+            return
+            
+        # Full path to the selected matcap
+        matcap_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+            "assets", "matcaps", selected_matcap
+        )
+        
+        try:
+            # Load the matcap texture
+            matcap_img = Image.open(matcap_path).convert("RGB")
+            
+            # Store in core for use in applying matcap effect
+            self.core.matcap_texture = matcap_img
+            
+            # Update the matcap texture preview
+            self.update_matcap_texture_preview()
+            
+            # If we already have a normal map, apply the new matcap
+            if self.core.normal_image is not None:
+                self.on_rotation_change()
+                
+            self.status_label.config(text=f"Status: Matcap changed to {selected_matcap}")
+        except Exception as e:
+            print(f"Error loading matcap: {e}")
+            self.status_label.config(text=f"Status: Error loading matcap: {str(e)}")
+    
+    def on_stacked_matcap_selected(self, event=None):
+        """Handle matcap selection change in the stacked tab."""
+        selected_matcap = self.stacked_matcap_var.get()
+        if not selected_matcap:
+            return
+            
+        # Full path to the selected matcap
+        matcap_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+            "assets", "matcaps", selected_matcap
+        )
+        
+        try:
+            # Load the matcap texture
+            matcap_img = Image.open(matcap_path).convert("RGB")
+            
+            # Store in core for use in applying matcap effect
+            self.core.matcap_texture = matcap_img
+            
+            # If we already have a normal map for stacked cones, apply the new matcap
+            if hasattr(self, 'stacked_normal_image') and self.stacked_normal_image is not None:
+                self.on_stacked_rotation_change()
+                
+            self.stacked_status_label.config(text=f"Matcap changed to {selected_matcap}")
+        except Exception as e:
+            print(f"Error loading matcap: {e}")
+            self.stacked_status_label.config(text=f"Error loading matcap: {str(e)}")
     
     def create_gui(self):
         """Create the user interface elements."""
@@ -251,6 +343,26 @@ class ConeNormalMapApp:
             parameters_frame, "Matcap Rotation (°):", self.stacked_rotation_var,
             0, 360, validate_float, lambda e: self.on_stacked_rotation_change(e), lambda: self.on_stacked_rotation_change()
         )
+        
+        # Add matcap selector
+        matcap_selector_frame = ttk.Frame(parameters_frame)
+        matcap_selector_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(matcap_selector_frame, text="Matcap Texture:").pack(anchor=tk.W, padx=5)
+        
+        # Create a combobox container
+        matcap_combo_frame = ttk.Frame(matcap_selector_frame)
+        matcap_combo_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Show a dropdown if we have matcaps available
+        matcap_combo = ttk.Combobox(
+            matcap_combo_frame, 
+            textvariable=self.stacked_matcap_var, 
+            values=self.matcap_files,
+            state="readonly" if self.matcap_files else "disabled",
+            width=15
+        )
+        matcap_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        matcap_combo.bind("<<ComboboxSelected>>", self.on_stacked_matcap_selected)
         
         # Add fast preview checkbox
         fast_preview_frame = ttk.Frame(parameters_frame)
@@ -484,6 +596,22 @@ class ConeNormalMapApp:
         matcap_frame.pack(fill=tk.X, pady=10)
         ttk.Label(matcap_frame, text="Matcap Visualization", font=("Arial", 12)).pack(pady=(0, 5))
         ttk.Separator(matcap_frame).pack(fill=tk.X, pady=5)
+        
+        # Add matcap selector
+        matcap_selector_frame = ttk.Frame(matcap_frame)
+        matcap_selector_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(matcap_selector_frame, text="Matcap Texture:").pack(side=tk.LEFT, padx=5)
+        
+        # Show a dropdown if we have matcaps available
+        matcap_combo = ttk.Combobox(
+            matcap_selector_frame, 
+            textvariable=self.matcap_var, 
+            values=self.matcap_files,
+            state="readonly" if self.matcap_files else "disabled",
+            width=15
+        )
+        matcap_combo.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        matcap_combo.bind("<<ComboboxSelected>>", self.on_matcap_selected)
         
         self.rotation_var = tk.DoubleVar(value=DEFAULT_MATCAP_ROTATION)
         self.create_parameter_slider(
@@ -1129,7 +1257,11 @@ class ConeNormalMapApp:
         # Calculate the display size to maintain aspect ratio
         display_size = min(canvas_width, canvas_height)
         
+        # Get original matcap dimensions
+        orig_width, orig_height = self.core.matcap_texture.size
+        
         # Resize image for display - use LANCZOS for better antialiasing in previews
+        # Handle different resolutions properly
         preview_img = self.core.matcap_texture.resize((display_size, display_size), Image.LANCZOS)
         photo = ImageTk.PhotoImage(preview_img)
         
@@ -1143,6 +1275,14 @@ class ConeNormalMapApp:
         # Clear canvas and display centered image
         self.matcap_texture_canvas.delete("all")
         self.matcap_texture_canvas.create_image(center_x, center_y, anchor=tk.CENTER, image=self.matcap_texture_preview)
+        
+        # Show resolution information
+        self.matcap_texture_canvas.create_text(
+            center_x, center_y + (display_size // 2) - 15,
+            text=f"{orig_width}×{orig_height}",
+            fill="#ffffff",
+            font=("Arial", 9)
+        )
     
     def start_periodic_updates(self):
         """Start the periodic UI update cycle."""
