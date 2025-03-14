@@ -22,6 +22,7 @@ class ConeNormalMapApp:
     
     def __init__(self, root):
         self.root = root
+        self.root.title("Auto Normal Perlage")  # Set the window title
         self.root.geometry("1400x800")
         self.root.configure(bg=DarkModeTheme.BACKGROUND)
         
