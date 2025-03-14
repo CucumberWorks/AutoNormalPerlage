@@ -76,8 +76,8 @@ class ConeNormalMapApp:
         self.additional_tab = ttk.Frame(self.notebook)
         
         # Add tabs to notebook
-        self.notebook.add(self.cone_tab, text="Cone Normal Map")
-        self.notebook.add(self.additional_tab, text="Additional Normal Map")
+        self.notebook.add(self.cone_tab, text="Circular Engraving")
+        self.notebook.add(self.additional_tab, text="Geneva Stripes")
         
         # Create content for cone tab
         self.create_cone_tab_content(self.cone_tab)
