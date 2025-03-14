@@ -10,6 +10,7 @@ AutoNormalPerlage generates high-quality normal maps for simulating detailed sur
 - Generates both height maps and normal maps
 - Includes matcap previews to visualize the 3D effect
 - Perfect for game assets, 3D models, and digital art
+- Uses Numba acceleration for fast performance
 
 ## Features
 
@@ -18,7 +19,7 @@ AutoNormalPerlage generates high-quality normal maps for simulating detailed sur
 - **Pattern Options**: Create single cones or arranged patterns
 - **Customizable**: Control segments, rotation, and other parameters
 - **Export Options**: Save high-resolution PNG outputs
-- **Numba Acceleration**: Uses JIT compilation for faster processing of large textures
+- **Optimized Performance**: JIT compilation with Numba for faster processing
 
 ## Quick Start
 
@@ -41,7 +42,7 @@ The generated normal maps can be directly imported into:
 
 - Python 3.x
 - NumPy, Pillow (PIL), SciPy, and Tkinter
-- Numba (for accelerated processing)
+- Numba (for JIT compilation and acceleration)
 
 ## Installation
 
@@ -55,12 +56,3 @@ Clone this repository and run the application:
 ```bash
 python cone_normal_map_generator.py
 ```
-
-## Performance Notes
-
-The application uses Numba JIT compilation to accelerate the computationally intensive parts:
-- Normal map generation from height maps
-- Cone pattern creation 
-- Stacked pattern calculations
-
-This results in significantly faster processing, especially for high-resolution textures (1024px+) and complex patterns.

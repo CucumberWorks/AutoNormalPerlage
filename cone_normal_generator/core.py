@@ -8,8 +8,7 @@ import math
 import numpy as np
 from PIL import Image
 from scipy.ndimage import convolve, gaussian_filter
-# Add Numba for JIT compilation
-from numba import njit, prange
+from numba import njit, float32, float64, int32, boolean
 
 from cone_normal_generator.config import (
     DEFAULT_SIZE, DEFAULT_HEIGHT, DEFAULT_STRENGTH, DEFAULT_DIAMETER,
@@ -19,118 +18,70 @@ from cone_normal_generator.config import (
 )
 from cone_normal_generator.helpers import ensure_folders_exist
 
-# JIT-compiled function for standard cone height map generation
+# Numba-optimized functions
 @njit
 def _create_standard_cone(size, center_x, center_y, radius, height, dist_from_center):
-    """Create a standard cone height map with JIT acceleration."""
+    """Create a standard cone height map using Numba acceleration."""
     # Create the standard cone shape (height decreases linearly with distance)
-    height_map = np.zeros((size, size), dtype=np.float32)
-    for y in range(size):
-        for x in range(size):
-            dist = dist_from_center[y, x]
-            if dist <= radius:
-                height_map[y, x] = height * (1.0 - dist / radius)
+    height_map = np.maximum(0, height * (1.0 - dist_from_center / radius))
     return height_map
 
-# JIT-compiled function for segmented cone height map generation
 @njit
 def _create_segmented_cone(size, radius, height, segments, segment_ratio, dist_from_center):
-    """Create a segmented cone height map with JIT acceleration."""
-    height_map = np.zeros((size, size), dtype=np.float32)
+    """Create a segmented cone height map using Numba acceleration."""
+    # Normalize distance to be 0 to 1 within the radius
+    normalized_dist = np.clip(dist_from_center / radius, 0, 1)
     
+    # Calculate position within the segment cycle (0 to 1 for each complete segment)
+    segment_pos = (normalized_dist * segments) % 1.0
+    
+    # Create height map
+    height_map = np.zeros_like(normalized_dist)
+    
+    # Process each pixel
     for y in range(size):
         for x in range(size):
-            dist = dist_from_center[y, x]
-            
-            # Normalize distance to be 0 to 1 within the radius
-            if dist > radius:
-                normalized_dist = 1.0  # Outside the radius
+            pos = segment_pos[y, x]
+            # Check if in up-slope (out) portion
+            if pos < segment_ratio:
+                # For up-slope: height increases linearly from 0 to 1
+                height_map[y, x] = pos / segment_ratio
             else:
-                normalized_dist = dist / radius
-                
-            # If within radius, calculate segmented height
-            if normalized_dist < 1.0:
-                # Calculate position within the segment cycle
-                segment_pos = (normalized_dist * segments) % 1.0
-                
-                # Determine if in up or down portion of segment
-                if segment_pos < segment_ratio:
-                    # Up-slope (out)
-                    up_pos = segment_pos / segment_ratio
-                    segment_height = up_pos
-                else:
-                    # Down-slope (in)
-                    down_pos = (segment_pos - segment_ratio) / (1.0 - segment_ratio)
-                    segment_height = 1.0 - down_pos
-                
-                # Apply final height with fade-out
-                height_map[y, x] = height * segment_height * (1.0 - normalized_dist)
+                # For down-slope: height decreases linearly from 1 to 0
+                height_map[y, x] = 1.0 - (pos - segment_ratio) / (1.0 - segment_ratio)
+    
+    # Fade out to 0 at the edges and scale by height
+    height_map = height * height_map * (1.0 - normalized_dist)
+    
+    # Set values outside the radius to 0
+    height_map[normalized_dist >= 1.0] = 0
     
     return height_map
 
-# JIT-compiled function for height map to normal map conversion
 @njit
-def _height_to_normal_jit(height_map, strength, size):
-    """Convert height map to normal map with JIT acceleration."""
-    normal_map = np.zeros((size, size, 3), dtype=np.uint8)
+def _apply_sobel_kernels(height_map_float, kernel_x, kernel_y):
+    """Apply Sobel kernels using Numba acceleration."""
+    height, width = height_map_float.shape
+    dx = np.zeros_like(height_map_float)
+    dy = np.zeros_like(height_map_float)
     
-    # Create Sobel kernels
-    kernel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float32) * strength
-    kernel_y = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=np.float32) * strength
-    
-    # Calculate gradients
-    dx = np.zeros((size, size), dtype=np.float32)
-    dy = np.zeros((size, size), dtype=np.float32)
-    
-    # Apply convolution manually (Numba doesn't support scipy.ndimage.convolve)
-    for y in range(1, size-1):
-        for x in range(1, size-1):
-            # X gradient
+    # Apply the kernels manually
+    for y in range(1, height - 1):
+        for x in range(1, width - 1):
+            # Apply x kernel
             dx[y, x] = (
-                kernel_x[0, 0] * height_map[y-1, x-1] +
-                kernel_x[0, 1] * height_map[y-1, x] +
-                kernel_x[0, 2] * height_map[y-1, x+1] +
-                kernel_x[1, 0] * height_map[y, x-1] +
-                kernel_x[1, 1] * height_map[y, x] +
-                kernel_x[1, 2] * height_map[y, x+1] +
-                kernel_x[2, 0] * height_map[y+1, x-1] +
-                kernel_x[2, 1] * height_map[y+1, x] +
-                kernel_x[2, 2] * height_map[y+1, x+1]
-            )
+                -1 * height_map_float[y-1, x-1] + 1 * height_map_float[y-1, x+1] +
+                -2 * height_map_float[y, x-1] + 2 * height_map_float[y, x+1] +
+                -1 * height_map_float[y+1, x-1] + 1 * height_map_float[y+1, x+1]
+            ) * kernel_x[1, 1]  # Use center value as scale factor
             
-            # Y gradient
+            # Apply y kernel
             dy[y, x] = (
-                kernel_y[0, 0] * height_map[y-1, x-1] +
-                kernel_y[0, 1] * height_map[y-1, x] +
-                kernel_y[0, 2] * height_map[y-1, x+1] +
-                kernel_y[1, 0] * height_map[y, x-1] +
-                kernel_y[1, 1] * height_map[y, x] +
-                kernel_y[1, 2] * height_map[y, x+1] +
-                kernel_y[2, 0] * height_map[y+1, x-1] +
-                kernel_y[2, 1] * height_map[y+1, x] +
-                kernel_y[2, 2] * height_map[y+1, x+1]
-            )
-    
-    # Prepare normal vector components
-    for y in range(size):
-        for x in range(size):
-            # Map from [-1,1] to [0,255] range for RGB
-            nx = 128 - dx[y, x] * 127
-            ny = 128 - dy[y, x] * 127
+                -1 * height_map_float[y-1, x-1] + -2 * height_map_float[y-1, x] + -1 * height_map_float[y-1, x+1] +
+                1 * height_map_float[y+1, x-1] + 2 * height_map_float[y+1, x] + 1 * height_map_float[y+1, x+1]
+            ) * kernel_y[1, 1]  # Use center value as scale factor
             
-            # Ensure z component is calculated to maintain normalized vectors
-            nz_squared = 1.0 - (dx[y, x]/127)**2 - (dy[y, x]/127)**2
-            if nz_squared < 0:
-                nz = 0
-            else:
-                nz = np.sqrt(nz_squared) * 255
-                
-            # Clamp values to valid range
-            normal_map[y, x, 0] = min(max(int(nx), 0), 255)
-            normal_map[y, x, 1] = min(max(int(ny), 0), 255)
-            normal_map[y, x, 2] = min(max(int(nz), 0), 255)
-    
-    return normal_map
+    return dx, dy
 
 class ConeNormalMapGenerator:
     """Core generator class for creating cone normal maps."""
@@ -177,10 +128,6 @@ class ConeNormalMapGenerator:
         # Fast preview mode caches
         self.preview_size_cache = None
         self.preview_height_map = None
-        
-        # Flag for using Numba acceleration
-        self.use_numba = True
-        print("Numba JIT acceleration enabled for faster processing")
 
     def load_matcap(self):
         """Load the matcap texture if available."""
@@ -293,59 +240,12 @@ class ConeNormalMapGenerator:
         # Calculate distance from center for each pixel
         dist_from_center = np.sqrt((x - center[0])**2 + (y - center[1])**2)
         
-        # Use JIT-accelerated functions if Numba is enabled
-        if self.use_numba:
-            if segments <= 1:
-                # Use accelerated standard cone function
-                height_map = _create_standard_cone(size, center[0], center[1], radius, height, dist_from_center)
-            else:
-                # Use accelerated segmented cone function
-                height_map = _create_segmented_cone(size, radius, height, segments, segment_ratio, dist_from_center)
+        if segments <= 1:
+            # Use Numba-accelerated function for standard cone
+            height_map = _create_standard_cone(size, center[0], center[1], radius, height, dist_from_center)
         else:
-            # Original non-JIT code path
-            if segments <= 1:
-                # Create the standard cone shape (height decreases linearly with distance)
-                height_map = np.maximum(0, height * (1.0 - dist_from_center / radius))
-            else:
-                # Create a segmented cone with alternating in/out rings using straight lines
-                # Normalize distance to be 0 to 1 within the radius
-                normalized_dist = np.clip(dist_from_center / radius, 0, 1)
-                
-                # Calculate the segment period
-                segment_period = 1.0 / segments
-                
-                # Calculate position within the segment cycle (0 to 1 for each complete segment)
-                # Each segment is divided into "out" and "in" portions
-                segment_pos = (normalized_dist * segments) % 1.0
-                
-                # Create straight line segments with adjustable ratio
-                # segment_ratio determines what portion of the cycle is "out" (rising) vs "in" (falling)
-                # For segment_ratio = 0.5 (50%), we get equal up/down slopes
-                # For segment_ratio = 0.7 (70%), we get longer up slopes and shorter down slopes
-                height_map = np.zeros_like(normalized_dist)
-                
-                # Calculate which pixels are in the up-slope (out) portion
-                up_mask = segment_pos < segment_ratio
-                # Calculate which pixels are in the down-slope (in) portion
-                down_mask = ~up_mask
-                
-                # For up-slope: height increases linearly from 0 to 1 over segment_ratio portion of the segment
-                # Normalized position within the up-slope: 0 to 1
-                up_pos = segment_pos / segment_ratio
-                
-                # For down-slope: height decreases linearly from 1 to 0 over (1-segment_ratio) portion of the segment
-                # Normalized position within the down-slope: 0 to 1
-                down_pos = (segment_pos - segment_ratio) / (1.0 - segment_ratio)
-                
-                # Apply the height values
-                height_map[up_mask] = up_pos[up_mask]
-                height_map[down_mask] = 1.0 - down_pos[down_mask]
-                
-                # Fade out to 0 at the edges
-                height_map = height * height_map * (1.0 - normalized_dist)
-                
-                # Set values outside the radius to 0
-                height_map[normalized_dist >= 1.0] = 0
+            # Use Numba-accelerated function for segmented cone
+            height_map = _create_segmented_cone(size, radius, height, segments, segment_ratio, dist_from_center)
         
         # Cache for fast preview mode
         if fast_preview and self.use_fast_preview:
@@ -355,7 +255,7 @@ class ConeNormalMapGenerator:
         return height_map
 
     def height_map_to_normal_map(self, height_map):
-        """Convert a height map to a normal map using SciPy."""
+        """Convert a height map to a normal map using SciPy with Numba acceleration."""
         # Get the dimensions of the height map
         height, width = height_map.shape
         
@@ -364,38 +264,31 @@ class ConeNormalMapGenerator:
         resolution_scale = max(width, height) / DEFAULT_SIZE
         adjusted_strength = self.strength * resolution_scale
         
-        if self.use_numba:
-            # Use JIT-accelerated normal map calculation
-            return _height_to_normal_jit(height_map.astype(np.float32), adjusted_strength, height)
-        else:
-            # Original non-JIT code path
-            # Define Sobel kernels
-            kernel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]) * adjusted_strength
-            kernel_y = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]]) * adjusted_strength
-            
-            # Convert height_map to float32 for better precision
-            height_map_float = height_map.astype(np.float32)
-            
-            # Use SciPy's convolve for processing
-            dx = convolve(height_map_float, kernel_x)
-            dy = convolve(height_map_float, kernel_y)
-            
-            # Prepare normal vector components
-            z = np.ones_like(dx)
-            
-            # Stack the components for vectorized operations
-            normal_vectors = np.stack([dx, dy, z], axis=-1)
-            
-            # Normalize to get unit vectors (vectorized)
-            # Add small epsilon to avoid division by zero
-            normal_length = np.sqrt(np.sum(normal_vectors**2, axis=2, keepdims=True)) + 1e-10
-            normal_vectors_normalized = normal_vectors / normal_length
-            
-            # Map from [-1,1] to [0,255] range for RGB
-            normal_map = (normal_vectors_normalized * 0.5 + 0.5) * 255
-            normal_map = normal_map.astype(np.uint8)
-            
-            return normal_map
+        # Define Sobel kernels
+        kernel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]) * adjusted_strength
+        kernel_y = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]]) * adjusted_strength
+        
+        # Convert height_map to float32 for better precision
+        height_map_float = height_map.astype(np.float32)
+        
+        # Use Numba-accelerated Sobel application for gradient calculation
+        dx, dy = _apply_sobel_kernels(height_map_float, kernel_x, kernel_y)
+        
+        # Prepare normal vector components
+        z = np.ones_like(dx)
+        
+        # Stack the components for vectorized operations
+        normal_vectors = np.stack([dx, dy, z], axis=-1)
+        
+        # Normalize to get unit vectors (vectorized)
+        # Add small epsilon to avoid division by zero
+        normal_length = np.sqrt(np.sum(normal_vectors**2, axis=2, keepdims=True)) + 1e-10
+        normal_vectors_normalized = normal_vectors / normal_length
+        
+        # Map from [-1,1] to [0,255] range for RGB
+        normal_map = np.uint8((normal_vectors_normalized + 1.0) * 127.5)
+        
+        return normal_map
 
     def generate_maps(self, update_callback=None):
         """Generate both height map and normal map with optional UI callback."""
