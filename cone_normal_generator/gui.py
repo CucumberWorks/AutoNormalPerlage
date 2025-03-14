@@ -26,8 +26,14 @@ def _calculate_stacked_cones(size, num_cones, first_x, center_y, spacing, base_r
     # Create an empty height map
     height_map = np.zeros((size, size), dtype=np.float32)
     
-    # Create indices grid once
-    y_indices, x_indices = np.mgrid[:size, :size]
+    # Create indices grid manually instead of using np.mgrid (not supported by Numba)
+    y_indices = np.zeros((size, size), dtype=np.float32)
+    x_indices = np.zeros((size, size), dtype=np.float32)
+    
+    for y in range(size):
+        for x in range(size):
+            y_indices[y, x] = y
+            x_indices[y, x] = x
     
     # Create stacked cones
     for i in range(num_cones):

@@ -83,6 +83,15 @@ def _apply_sobel_kernels(height_map_float, kernel_x, kernel_y):
             
     return dx, dy
 
+# Function to create coordinate grids in a Numba-compatible way
+def create_coordinate_grid(size):
+    """Create coordinate grid without using np.ogrid (for Numba compatibility)."""
+    # Create coordinate arrays
+    y = np.arange(size).reshape(-1, 1)  # Column vector
+    x = np.arange(size).reshape(1, -1)  # Row vector
+    
+    return y, x
+
 class ConeNormalMapGenerator:
     """Core generator class for creating cone normal maps."""
     
@@ -234,8 +243,8 @@ class ConeNormalMapGenerator:
         segments = self.segments
         segment_ratio = self.segment_ratio / 100.0  # Convert from percentage (0-100) to fraction (0-1)
         
-        # Create a grid of coordinates
-        y, x = np.ogrid[:size, :size]
+        # Create a grid of coordinates in a Numba-compatible way
+        y, x = create_coordinate_grid(size)
         
         # Calculate distance from center for each pixel
         dist_from_center = np.sqrt((x - center[0])**2 + (y - center[1])**2)
