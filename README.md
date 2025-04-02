@@ -19,6 +19,25 @@ AutoNormalPerlage generates high-quality normal maps for simulating detailed sur
 - **Customizable**: Control segments, rotation, and other parameters
 - **Export Options**: Save high-resolution PNG outputs
 
+## Output Types
+
+The application generates three different visualization types:
+
+### Height Map
+![Height Map Example](assets/examples/1_height_map.png)
+
+A grayscale representation where brightness indicates height. The brightest areas (white) represent the highest points of the surface, while darker areas represent lower points. This is the raw height data before normal conversion.
+
+### Normal Map
+![Normal Map Example](assets/examples/1_normal_map.png)
+
+RGB-encoded surface normals where each color channel (red, green, blue) represents the X, Y, and Z components of the surface normal vector. This format is used by game engines and 3D software to simulate detailed surfaces without additional geometry.
+
+### Matcap Preview
+![Matcap Preview Example](assets/examples/1_matcap.png)
+
+A visualization of how the normal map would appear when rendered with materials and lighting. This preview uses environment mapping (material capture or "matcap") to simulate realistic lighting and reflections on the surface.
+
 ## Quick Start
 
 1. Run `python cone_normal_map_generator.py`
