@@ -43,3 +43,6 @@ output/
 .vscode/
 *.swp
 *.swo 
+
+# Git scripts
+change_author.sh 

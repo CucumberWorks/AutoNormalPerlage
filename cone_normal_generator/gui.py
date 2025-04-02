@@ -7,8 +7,6 @@ from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk, ImageDraw
 import math
 import glob
-import numpy as np
-from numba import njit, prange
 
 from cone_normal_generator.config import (
     DEFAULT_SIZE, DEFAULT_DIAMETER, DEFAULT_HEIGHT, DEFAULT_STRENGTH,
@@ -19,70 +17,6 @@ from cone_normal_generator.core import ConeNormalMapGenerator
 from cone_normal_generator.styling import DarkModeTheme, setup_dark_theme
 from cone_normal_generator.helpers import validate_numeric, open_folder, clean_folder
 
-# Numba-optimized functions for stacked cone generation
-@njit
-def _calculate_stacked_cones(size, num_cones, first_x, center_y, spacing, base_radius, height):
-    """Calculate stacked cones height map using Numba acceleration."""
-    # Create an empty height map
-    height_map = np.zeros((size, size), dtype=np.float32)
-    
-    # Create indices grid manually instead of using np.mgrid (not supported by Numba)
-    y_indices = np.zeros((size, size), dtype=np.float32)
-    x_indices = np.zeros((size, size), dtype=np.float32)
-    
-    for y in range(size):
-        for x in range(size):
-            y_indices[y, x] = y
-            x_indices[y, x] = x
-    
-    # Create stacked cones
-    for i in range(num_cones):
-        # Calculate position for this cone
-        pos_x = first_x + (i * spacing)
-        pos_y = center_y
-        
-        # Calculate distance from center for each pixel
-        dist_from_center = np.sqrt((x_indices - pos_x)**2 + (y_indices - pos_y)**2)
-        
-        # Calculate cone height at each point
-        cone_height = np.maximum(0, 1.0 - dist_from_center / base_radius) * height
-        
-        # Combine with existing height map using 'replace' blend mode where the cone exists
-        mask = cone_height > 0
-        for y in range(size):
-            for x in range(size):
-                if mask[y, x]:
-                    height_map[y, x] = cone_height[y, x]
-    
-    return height_map
-
-@njit
-def _calculate_sobel_gradients(height_map, strength, resolution_factor):
-    """Calculate Sobel gradients for normal map using Numba acceleration."""
-    size = height_map.shape[0]
-    grad_x = np.zeros_like(height_map)
-    grad_y = np.zeros_like(height_map)
-    
-    # Adjusted strength based on resolution
-    adjusted_strength = strength * resolution_factor
-    
-    # Apply Sobel kernel manually
-    for y in range(1, size - 1):
-        for x in range(1, size - 1):
-            # X gradient (horizontal)
-            grad_x[y, x] = (
-                -1 * height_map[y-1, x-1] + 1 * height_map[y-1, x+1] +
-                -2 * height_map[y, x-1] + 2 * height_map[y, x+1] +
-                -1 * height_map[y+1, x-1] + 1 * height_map[y+1, x+1]
-            ) * adjusted_strength
-            
-            # Y gradient (vertical)
-            grad_y[y, x] = (
-                -1 * height_map[y-1, x-1] + -2 * height_map[y-1, x] + -1 * height_map[y-1, x+1] +
-                1 * height_map[y+1, x-1] + 2 * height_map[y+1, x] + 1 * height_map[y+1, x+1]
-            ) * adjusted_strength
-    
-    return grad_x, grad_y
 
 class ConeNormalMapApp:
     """Main application UI for the Cone Normal Map Generator."""
@@ -1544,6 +1478,13 @@ class ConeNormalMapApp:
             
     def generate_stacked_cone_maps(self, size, num_cones, radius_percent, height, strength, is_preview=False):
         """Generate stacked cone height and normal maps with repeatable edges."""
+        # Create a height map with stacked cones
+        import numpy as np
+        from PIL import Image
+        
+        # Create an empty height map
+        height_map = np.zeros((size, size), dtype=np.float32)
+        
         # Calculate base radius from the optimized radius_percent
         # We don't need to round again since it was already optimized
         base_radius = size * radius_percent / 100 / 2
@@ -1564,13 +1505,29 @@ class ConeNormalMapApp:
         first_x = -base_radius
         center_y = size - base_radius  # Position at bottom edge
         
-        # Use Numba-accelerated function to generate stacked cones
-        height_map = _calculate_stacked_cones(
-            size, num_cones, first_x, center_y, spacing, base_radius, height
-        )
+        # Create stacked cones
+        for i in range(num_cones):
+            # Calculate position for this cone
+            pos_x = first_x + (i * spacing)
+            pos_y = center_y
+            
+            # All cones have the same height and radius
+            current_height = height
+            current_radius = base_radius
+            
+            # Generate the cone (even if partially off-image)
+            y_indices, x_indices = np.ogrid[:size, :size]
+            dist_from_center = np.sqrt((x_indices - pos_x)**2 + (y_indices - pos_y)**2)
+            
+            # Calculate cone height at each point (only within image bounds)
+            cone_height = np.maximum(0, 1.0 - dist_from_center / current_radius) * current_height
+            
+            # Combine with existing height map using 'replace' blend mode where the cone exists
+            mask = cone_height > 0  # Create a mask where the cone exists
+            height_map[mask] = cone_height[mask]  # Replace only where the cone exists
         
         # Convert to PIL image for rotation
-        height_img = Image.fromarray((height_map / np.max(height_map) * 255).astype(np.uint8))
+        height_img = Image.fromarray((height_map / height_map.max() * 255).astype(np.uint8))
         
         # Apply rotation to height map if needed
         rotation_angle = self.height_rotation_var.get()
@@ -1578,16 +1535,28 @@ class ConeNormalMapApp:
             # PIL's rotate method takes counterclockwise angles, so we negate the angle
             height_img = height_img.rotate(-rotation_angle, resample=Image.BICUBIC, expand=False)
             # Convert back to numpy array for normal map generation
-            height_map = np.array(height_img).astype(np.float32) / 255.0 * np.max(height_map)
+            height_map = np.array(height_img).astype(np.float32) / 255.0 * height_map.max()
         
-        # Calculate gradients using Numba-accelerated Sobel operators
+        # Calculate gradients using Sobel operators (more accurate at higher resolutions)
         normal_map = np.zeros((size, size, 3), dtype=np.uint8)
         
-        # Calculate resolution factor for strength adjustment
-        resolution_factor = size / 512.0  # Normalize to a reference resolution of 512
+        # Apply Sobel kernels for better gradient calculation
+        from scipy import ndimage
         
-        # Use Numba-accelerated function for gradient calculation
-        grad_x, grad_y = _calculate_sobel_gradients(height_map, strength, resolution_factor)
+        # Create Sobel kernels
+        sobel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
+        sobel_y = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
+        
+        # Apply convolution for gradient calculation
+        grad_x = ndimage.convolve(height_map, sobel_x)
+        grad_y = ndimage.convolve(height_map, sobel_y)
+        
+        # Scale gradients by strength and normalize based on resolution
+        resolution_factor = size / 512.0  # Normalize to a reference resolution of 512
+        adjusted_strength = strength * resolution_factor
+        
+        grad_x = grad_x * adjusted_strength
+        grad_y = grad_y * adjusted_strength
         
         # Create the normal map
         normal_map[:, :, 0] = np.uint8(np.clip(128 - grad_x * 127, 0, 255))
@@ -1597,9 +1566,12 @@ class ConeNormalMapApp:
         z_component = np.sqrt(np.maximum(0.0, 1.0 - np.square(grad_x/127) - np.square(grad_y/127)))
         normal_map[:, :, 2] = np.uint8(np.clip(z_component * 255, 0, 255))
         
-        # Convert to PIL images if not already
-        if rotation_angle == 0:
-            height_img = Image.fromarray((height_map / np.max(height_map) * 255).astype(np.uint8))
+        # Convert to PIL images
+        if rotation_angle != 0:
+            # We already converted height_img earlier
+            pass
+        else:
+            height_img = Image.fromarray((height_map / height_map.max() * 255).astype(np.uint8))
             
         normal_img = Image.fromarray(normal_map)
         
@@ -1616,10 +1588,27 @@ class ConeNormalMapApp:
         # Save current images in memory
         self.stacked_height_image = height_img
         self.stacked_normal_image = normal_img
-        if matcap_img:
-            self.stacked_matcap_image = matcap_img
+        self.stacked_matcap_image = matcap_img or normal_img  # Fallback to normal map if no matcap
         
-        return height_img, normal_img, matcap_img
+        # Display previews
+        self.update_stacked_previews()
+        
+        # Format spacing value for display
+        formatted_spacing = "{:.2f}".format(spacing_percent)
+        formatted_diameter = "{:.2f}".format(round(radius_percent, 2))
+        
+        # Update status with detailed information if not a preview
+        rotation_text = f", Rotation: {rotation_angle}°" if rotation_angle != 0 else ""
+        
+        if not is_preview:
+            self.stacked_status_label.config(
+                text=f"Generated seamless pattern with {num_cones} cones at {formatted_spacing}% spacing (size: {size}px, diameter: {formatted_diameter}%{rotation_text})"
+            )
+        else:
+            # Just update with a simpler message for previews
+            self.stacked_status_label.config(
+                text=f"Preview: {num_cones} cones at {formatted_spacing}% spacing (diameter: {formatted_diameter}%{rotation_text})"
+            )
     
     def update_stacked_previews(self):
         """Update the stacked cone preview canvases with the generated images."""

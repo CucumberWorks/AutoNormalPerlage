@@ -1,0 +1,1148 @@
+"""
+User interface for the Cone Normal Map Generator.
+"""
+import os
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from PIL import Image, ImageTk
+import math
+
+from cone_normal_generator.config import (
+    DEFAULT_SIZE, DEFAULT_DIAMETER, DEFAULT_HEIGHT, DEFAULT_STRENGTH,
+    DEFAULT_SEGMENTS, DEFAULT_SEGMENT_RATIO, DEFAULT_MATCAP_ROTATION,
+    AUTO_REFRESH_DELAY, SLIDER_DRAG_DELAY, TEMP_FOLDER, OUTPUT_FOLDER
+)
+from cone_normal_generator.core import ConeNormalMapGenerator
+from cone_normal_generator.styling import DarkModeTheme, setup_dark_theme
+from cone_normal_generator.helpers import validate_numeric, open_folder, clean_folder
+
+
+class ConeNormalMapApp:
+    """Main application UI for the Cone Normal Map Generator."""
+    
+    def __init__(self, root):
+        self.root = root
+        self.root.geometry("1400x800")
+        self.root.configure(bg=DarkModeTheme.BACKGROUND)
+        
+        # Create core
+        self.core = ConeNormalMapGenerator()
+        
+        # Configure style for dark mode
+        self.style = setup_dark_theme(root)
+        
+        # Preview images placeholders
+        self.height_preview = None
+        self.normal_preview = None
+        self.matcap_preview = None
+        self.matcap_texture_preview = None
+        self.empty_preview_img = None
+        
+        # UI state tracking
+        self.slider_dragging = False
+        self.update_timer = None
+        
+        # Create UI elements
+        self.create_gui()
+        
+        # Force a full UI refresh before continguing
+        self.root.update_idletasks()
+        
+        # Initialize UI with empty previews
+        self.root.after(10, self.safe_display_empty_previews)
+        
+        # Start periodic updates
+        self.root.after(100, self.start_periodic_updates)
+        
+        # When closing the app, clean up temp files
+        root.protocol("WM_DELETE_WINDOW", self.on_closing)
+    
+    def create_gui(self):
+        """Create the user interface elements."""
+        # Main frame
+        main_frame = ttk.Frame(self.root)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Create notebook (tabbed interface)
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+        
+        # Create tabs
+        self.cone_tab = ttk.Frame(self.notebook)
+        self.additional_tab = ttk.Frame(self.notebook)
+        
+        # Add tabs to notebook
+        self.notebook.add(self.cone_tab, text="Cone Normal Map")
+        self.notebook.add(self.additional_tab, text="Additional Normal Map")
+        
+        # Create content for cone tab
+        self.create_cone_tab_content(self.cone_tab)
+        
+        # Create content for additional tab (placeholder for now)
+        self.create_additional_tab_content(self.additional_tab)
+    
+    def create_cone_tab_content(self, parent):
+        """Create the content for the cone normal map tab."""
+        # Left sidebar
+        sidebar = ttk.Frame(parent, width=300)
+        sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        
+        # Make sidebar fixed width
+        sidebar.pack_propagate(False)
+        
+        # Create parameter controls
+        self.create_parameter_controls(sidebar)
+        
+        # Status section
+        status_frame = ttk.Frame(sidebar)
+        status_frame.pack(fill=tk.X, pady=10)
+        
+        self.status_label = ttk.Label(status_frame, text="Status: Ready", wraplength=280)
+        self.status_label.pack(pady=5, anchor=tk.W)
+        
+        # Right content for image display in a 2x2 grid
+        content_frame = ttk.Frame(parent)
+        content_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        # Create preview canvases
+        self.create_preview_canvases(content_frame)
+    
+    def create_additional_tab_content(self, parent):
+        """Create the content for the additional normal map tab."""
+        # Left sidebar
+        sidebar = ttk.Frame(parent, width=300)
+        sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        
+        # Make sidebar fixed width
+        sidebar.pack_propagate(False)
+        
+        # Parameter section
+        parameters_frame = ttk.Frame(sidebar)
+        parameters_frame.pack(fill=tk.X, pady=10)
+        
+        ttk.Label(parameters_frame, text="Stacked Cone Parameters", font=("Arial", 14)).pack(pady=(0, 10))
+        ttk.Separator(parameters_frame).pack(fill=tk.X, pady=5)
+        
+        # Register validation commands
+        validate_float = self.root.register(lambda P: validate_numeric(P, False))
+        validate_int = self.root.register(lambda P: validate_numeric(P, True))
+        
+        # Size selection (reuse from first tab)
+        size_frame = ttk.Frame(parameters_frame)
+        size_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(size_frame, text="Image Size:").pack(side=tk.LEFT, padx=5)
+        
+        size_values = ["128", "256", "512", "1024", "2048"]
+        self.stacked_size_var = tk.StringVar(value=str(DEFAULT_SIZE))
+        size_combo = ttk.Combobox(size_frame, textvariable=self.stacked_size_var, values=size_values, state="readonly", width=10)
+        size_combo.pack(side=tk.LEFT, padx=5)
+        
+        # Number of cones to stack
+        self.num_cones_var = tk.IntVar(value=5)
+        self.create_parameter_slider(
+            parameters_frame, "Number of Cones:", self.num_cones_var,
+            2, 10, validate_int, lambda e: self.on_stacked_parameter_change(), lambda: self.on_stacked_parameter_change()
+        )
+        
+        # Cone diameter (reuse from first tab)
+        self.stacked_radius_var = tk.DoubleVar(value=DEFAULT_DIAMETER)
+        self.create_parameter_slider(
+            parameters_frame, "Cone Diameter (%):", self.stacked_radius_var,
+            20, 100, validate_int, lambda e: self.on_stacked_parameter_change(), lambda: self.on_stacked_parameter_change()
+        )
+        
+        # Cone height (reuse from first tab)
+        self.stacked_height_var = tk.DoubleVar(value=DEFAULT_HEIGHT)
+        self.create_parameter_slider(
+            parameters_frame, "Cone Height:", self.stacked_height_var,
+            0.1, 2.0, validate_float, lambda e: self.on_stacked_parameter_change(), lambda: self.on_stacked_parameter_change()
+        )
+        
+        # Spacing between cones
+        self.spacing_var = tk.DoubleVar(value=20.0)
+        self.create_parameter_slider(
+            parameters_frame, "Spacing (%):", self.spacing_var,
+            5, 50, validate_float, lambda e: self.on_stacked_parameter_change(), lambda: self.on_stacked_parameter_change()
+        )
+        
+        # Direction angle
+        self.angle_var = tk.DoubleVar(value=45.0)
+        self.create_parameter_slider(
+            parameters_frame, "Direction Angle (°):", self.angle_var,
+            0, 360, validate_float, lambda e: self.on_stacked_parameter_change(), lambda: self.on_stacked_parameter_change()
+        )
+        
+        # Fade factor for stacked cones
+        self.fade_var = tk.DoubleVar(value=0.8)
+        self.create_parameter_slider(
+            parameters_frame, "Height Fade Factor:", self.fade_var,
+            0.5, 1.0, validate_float, lambda e: self.on_stacked_parameter_change(), lambda: self.on_stacked_parameter_change()
+        )
+        
+        # Normal map strength
+        self.stacked_strength_var = tk.DoubleVar(value=DEFAULT_STRENGTH)
+        self.create_parameter_slider(
+            parameters_frame, "Normal Map Strength:", self.stacked_strength_var,
+            1.0, 10.0, validate_float, lambda e: self.on_stacked_parameter_change(), lambda: self.on_stacked_parameter_change()
+        )
+        
+        # Create buttons
+        buttons_frame = ttk.Frame(parameters_frame)
+        buttons_frame.pack(fill=tk.X, pady=15)
+        
+        self.stacked_generate_button = ttk.Button(
+            buttons_frame, 
+            text="Generate Stacked Cones", 
+            command=self.on_stacked_generate, 
+            style="Generate.TButton"
+        )
+        self.stacked_generate_button.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.X, expand=True)
+        
+        self.stacked_save_button = ttk.Button(
+            buttons_frame, 
+            text="Save Images", 
+            command=self.on_stacked_save, 
+            style="Save.TButton", 
+            state=tk.DISABLED
+        )
+        self.stacked_save_button.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.X, expand=True)
+        
+        # Status section
+        status_frame = ttk.Frame(sidebar)
+        status_frame.pack(fill=tk.X, pady=10)
+        
+        self.stacked_status_label = ttk.Label(status_frame, text="Status: Ready", wraplength=280)
+        self.stacked_status_label.pack(pady=5, anchor=tk.W)
+        
+        # Right content for image preview in a 2x2 grid (similar to first tab)
+        content_frame = ttk.Frame(parent)
+        content_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        # Create preview canvases for stacked cones
+        self.create_stacked_preview_canvases(content_frame)
+    
+    def create_parameter_controls(self, parent):
+        """Create all parameter control widgets."""
+        # Parameters section
+        parameters_frame = ttk.Frame(parent)
+        parameters_frame.pack(fill=tk.X, pady=10)
+        
+        ttk.Label(parameters_frame, text="Cone Parameters", font=("Arial", 14)).pack(pady=(0, 10))
+        ttk.Separator(parameters_frame).pack(fill=tk.X, pady=5)
+        
+        # Register validation commands
+        validate_float = self.root.register(lambda P: validate_numeric(P, False))
+        validate_int = self.root.register(lambda P: validate_numeric(P, True))
+        
+        # Size selection
+        size_frame = ttk.Frame(parameters_frame)
+        size_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(size_frame, text="Image Size:").pack(side=tk.LEFT, padx=5)
+        
+        size_values = ["128", "256", "512", "1024", "2048"]
+        self.size_var = tk.StringVar(value=str(DEFAULT_SIZE))
+        size_combo = ttk.Combobox(size_frame, textvariable=self.size_var, values=size_values, state="readonly", width=10)
+        size_combo.pack(side=tk.LEFT, padx=5)
+        size_combo.bind("<<ComboboxSelected>>", self.on_size_change)
+        
+        # Additional styling for combobox - this helps with some platforms
+        size_combo.configure(background=DarkModeTheme.DARK_BG, foreground=DarkModeTheme.TEXT)
+        
+        # Create all the sliders with their input fields
+        self.radius_var = tk.DoubleVar(value=DEFAULT_DIAMETER)
+        self.create_parameter_slider(
+            parameters_frame, "Cone Diameter (%):", self.radius_var,
+            20, 180, validate_int, self.on_radius_change, self.on_radius_entry_change
+        )
+        
+        self.height_var = tk.DoubleVar(value=DEFAULT_HEIGHT)
+        self.create_parameter_slider(
+            parameters_frame, "Cone Height:", self.height_var,
+            0.1, 2.0, validate_float, self.on_height_change, self.on_height_entry_change
+        )
+        
+        self.strength_var = tk.DoubleVar(value=DEFAULT_STRENGTH)
+        self.create_parameter_slider(
+            parameters_frame, "Normal Map Strength:", self.strength_var,
+            1.0, 10.0, validate_float, self.on_strength_change, self.on_strength_entry_change
+        )
+        
+        # Segments slider with custom behavior for integer values
+        segments_frame = ttk.Frame(parameters_frame)
+        segments_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(segments_frame, text="Cone Segments:").pack(anchor=tk.W, padx=5)
+        
+        # Add a frame for the slider and input
+        segments_control_frame = ttk.Frame(segments_frame)
+        segments_control_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.segments_var = tk.IntVar(value=DEFAULT_SEGMENTS)
+        
+        # Create a wrapper function to ensure integer values
+        def on_segments_drag(val):
+            # Force integer value during slider dragging
+            int_val = int(float(val))
+            if int_val != self.segments_var.get():
+                self.segments_var.set(int_val)
+            self.on_segments_change()
+        
+        segments_slider = ttk.Scale(segments_control_frame, from_=1, to=100, variable=self.segments_var, command=on_segments_drag)
+        segments_slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # Add number input
+        segments_entry = ttk.Entry(segments_control_frame, textvariable=self.segments_var, width=5, validate="key", validatecommand=(validate_int, '%P'))
+        segments_entry.pack(side=tk.RIGHT, padx=5)
+        segments_entry.bind("<Return>", lambda e: self.on_segments_entry_change())
+        segments_entry.bind("<FocusOut>", lambda e: self.on_segments_entry_change())
+        
+        self.segment_ratio_var = tk.IntVar(value=DEFAULT_SEGMENT_RATIO)
+        self.create_parameter_slider(
+            parameters_frame, "Segment Ratio (% Out):", self.segment_ratio_var,
+            10, 90, validate_int, self.on_segment_ratio_change, self.on_segment_ratio_entry_change
+        )
+        
+        # Matcap section
+        matcap_frame = ttk.Frame(parameters_frame)
+        matcap_frame.pack(fill=tk.X, pady=10)
+        ttk.Label(matcap_frame, text="Matcap Visualization", font=("Arial", 12)).pack(pady=(0, 5))
+        ttk.Separator(matcap_frame).pack(fill=tk.X, pady=5)
+        
+        self.rotation_var = tk.DoubleVar(value=DEFAULT_MATCAP_ROTATION)
+        self.create_parameter_slider(
+            matcap_frame, "Matcap Rotation (°):", self.rotation_var,
+            0, 360, validate_int, self.on_rotation_change, self.on_rotation_entry_change
+        )
+        
+        # Add fast preview checkbox
+        fast_preview_frame = ttk.Frame(matcap_frame)
+        fast_preview_frame.pack(fill=tk.X, pady=5)
+        
+        self.fast_preview_var = tk.BooleanVar(value=True)
+        fast_preview_check = ttk.Checkbutton(
+            fast_preview_frame, 
+            text="Use Fast Preview", 
+            variable=self.fast_preview_var,
+            command=self.on_fast_preview_change
+        )
+        fast_preview_check.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        # Add quality indicator label
+        self.preview_quality_label = ttk.Label(
+            fast_preview_frame, 
+            text="(Fast Mode)", 
+            foreground="#4296fa"
+        )
+        self.preview_quality_label.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        # Buttons
+        self.create_action_buttons(parameters_frame)
+    
+    def create_parameter_slider(self, parent, label_text, variable, min_val, max_val, 
+                              validate_cmd, slider_callback, entry_callback):
+        """Create a slider with a label and input field."""
+        frame = ttk.Frame(parent)
+        frame.pack(fill=tk.X, pady=5)
+        ttk.Label(frame, text=label_text).pack(anchor=tk.W, padx=5)
+        
+        # Add a frame for the slider and input
+        control_frame = ttk.Frame(frame)
+        control_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        slider = ttk.Scale(control_frame, from_=min_val, to=max_val, variable=variable, command=slider_callback)
+        slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # Add number input
+        entry = ttk.Entry(control_frame, textvariable=variable, width=5, validate="key", validatecommand=validate_cmd)
+        entry.pack(side=tk.RIGHT, padx=5)
+        entry.bind("<Return>", lambda e: entry_callback())
+        entry.bind("<FocusOut>", lambda e: entry_callback())
+        
+        return frame, slider, entry
+    
+    def create_action_buttons(self, parent):
+        """Create action buttons for the UI."""
+        # Buttons
+        buttons_frame = ttk.Frame(parent)
+        buttons_frame.pack(fill=tk.X, pady=15)
+        
+        self.generate_button = ttk.Button(buttons_frame, text="Generate", command=self.on_generate, style="Generate.TButton")
+        self.generate_button.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.X, expand=True)
+        
+        self.save_button = ttk.Button(buttons_frame, text="Save Images", command=self.on_save, style="Save.TButton", state=tk.DISABLED)
+        self.save_button.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.X, expand=True)
+        
+        # Clean output folder button
+        clean_button_frame = ttk.Frame(parent)
+        clean_button_frame.pack(fill=tk.X, pady=5)
+        
+        self.clean_button = ttk.Button(clean_button_frame, text="Clean Output Folder", command=self.on_clean_output, style="Clean.TButton")
+        self.clean_button.pack(pady=5, fill=tk.X)
+        
+        # Output folder button
+        folder_frame = ttk.Frame(parent)
+        folder_frame.pack(fill=tk.X, pady=5)
+        
+        open_folder_button = ttk.Button(folder_frame, text="Open Output Folder", 
+                                      command=lambda: self.open_output_folder())
+        open_folder_button.pack(pady=5, fill=tk.X)
+    
+    def create_preview_canvases(self, parent):
+        """Create canvas widgets for displaying the previews."""
+        # Set up image preview area - 2x2 grid
+        preview_frame = ttk.Frame(parent)
+        preview_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Create a grid for the previews
+        preview_grid = ttk.Frame(preview_frame)
+        preview_grid.pack(fill=tk.BOTH, expand=True)
+        
+        # Row 1: Height Map and Normal Map
+        height_frame = ttk.Frame(preview_grid)
+        height_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        
+        normal_frame = ttk.Frame(preview_grid)
+        normal_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+        
+        # Row 2: Matcap Preview and Matcap Texture
+        matcap_preview_frame = ttk.Frame(preview_grid)
+        matcap_preview_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        
+        matcap_texture_frame = ttk.Frame(preview_grid)
+        matcap_texture_frame.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
+        
+        # Configure the grid to expand properly
+        preview_grid.columnconfigure(0, weight=1)
+        preview_grid.columnconfigure(1, weight=1)
+        preview_grid.rowconfigure(0, weight=1)
+        preview_grid.rowconfigure(1, weight=1)
+        
+        # Height map preview
+        ttk.Label(height_frame, text="Height Map", font=("Arial", 12)).pack(pady=(0, 5))
+        self.height_canvas = tk.Canvas(height_frame, bg=DarkModeTheme.DARK_BG, highlightthickness=1, highlightbackground=DarkModeTheme.BORDER)
+        self.height_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Normal map preview
+        ttk.Label(normal_frame, text="Normal Map", font=("Arial", 12)).pack(pady=(0, 5))
+        self.normal_canvas = tk.Canvas(normal_frame, bg=DarkModeTheme.DARK_BG, highlightthickness=1, highlightbackground=DarkModeTheme.BORDER)
+        self.normal_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Matcap preview
+        ttk.Label(matcap_preview_frame, text="Matcap Preview", font=("Arial", 12)).pack(pady=(0, 5))
+        self.matcap_preview_canvas = tk.Canvas(matcap_preview_frame, bg=DarkModeTheme.DARK_BG, highlightthickness=1, highlightbackground=DarkModeTheme.BORDER)
+        self.matcap_preview_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Matcap texture 
+        ttk.Label(matcap_texture_frame, text="Matcap Texture", font=("Arial", 12)).pack(pady=(0, 5))
+        self.matcap_texture_canvas = tk.Canvas(matcap_texture_frame, bg=DarkModeTheme.DARK_BG, highlightthickness=1, highlightbackground=DarkModeTheme.BORDER)
+        self.matcap_texture_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+    
+    def safe_display_empty_previews(self):
+        """Thread-safe way to display empty previews on Tkinter canvases."""
+        try:
+            self.display_empty_previews()
+            print("Empty previews initialized successfully")
+        except Exception as e:
+            print(f"Error initializing previews: {e}")
+            # Try again after a short delay
+            self.root.after(100, self.safe_display_empty_previews)
+    
+    def display_empty_previews(self):
+        """Display empty preview canvases."""
+        try:
+            # Create empty images
+            empty_img = Image.new('RGB', (DEFAULT_SIZE, DEFAULT_SIZE), color=(50, 50, 50))
+            empty_photo = ImageTk.PhotoImage(empty_img)
+            
+            # Save references to avoid garbage collection
+            self.empty_preview_img = empty_photo
+            
+            # Display on canvases - center the images
+            for canvas in [self.height_canvas, self.normal_canvas, 
+                        self.matcap_preview_canvas, self.matcap_texture_canvas]:
+                canvas.delete("all")
+                
+                # Get canvas dimensions
+                canvas_width = canvas.winfo_width()
+                canvas_height = canvas.winfo_height()
+                
+                # Use default dimensions if canvas hasn't been rendered yet
+                if canvas_width < 10:  # Not properly sized yet
+                    canvas_width = 300
+                    canvas_height = 300
+                    
+                # Calculate center position
+                center_x = canvas_width // 2
+                center_y = canvas_height // 2
+                
+                # Place image in center
+                canvas.create_image(center_x, center_y, anchor=tk.CENTER, image=self.empty_preview_img)
+        except Exception as e:
+            print(f"Error displaying empty previews: {e}")
+    
+    # Parameter change handlers
+    def on_size_change(self, event=None):
+        """Handle change in size selection."""
+        size = int(self.size_var.get())
+        self.core.size = size
+        
+        # For resolution changes, we need a full regeneration, not just a fast preview
+        # Clear any preview cache to force regeneration
+        self.core.preview_size_cache = None
+        self.core.preview_height_map = None
+        
+        # Use full generation instead of qguick preview for size changes
+        if not self.core.generation_in_progress:
+            self.core.generate_maps(self.update_gui)
+    
+    def on_radius_change(self, event=None):
+        """Handle change in radius slider."""
+        radius = round(self.radius_var.get())
+        self.core.radius_percent = radius
+        
+        # Set dragging state while slider is being adjusted
+        self.slider_dragging = True
+        
+        # Schedule preview update
+        self.schedule_preview_update()
+    
+    def on_radius_entry_change(self):
+        """Handle direct input in diameter entry."""
+        try:
+            diameter = int(self.radius_var.get())
+            # Constrain to valid range
+            diameter = max(20, min(180, diameter))
+            self.radius_var.set(diameter)
+            self.core.radius_percent = diameter
+            
+            # Not dragging when manually entering a value
+            self.slider_dragging = False
+            
+            # Schedule preview update
+            self.schedule_preview_update()
+        except ValueError:
+            # Reset to last valid value
+            self.radius_var.set(self.core.radius_percent)
+    
+    def on_height_change(self, event=None):
+        """Handle change in height slider."""
+        height = round(self.height_var.get(), 1)
+        self.core.height = height
+        
+        # Set dragging state
+        self.slider_dragging = True
+        
+        # Schedule preview update
+        self.schedule_preview_update()
+    
+    def on_height_entry_change(self):
+        """Handle direct input in height entry."""
+        try:
+            height = float(self.height_var.get())
+            # Constrain to valid range
+            height = max(0.1, min(2.0, height))
+            self.height_var.set(round(height, 1))
+            self.core.height = height
+            
+            # Not dragging when manually entering a value
+            self.slider_dragging = False
+            
+            # Schedule preview update
+            self.schedule_preview_update()
+        except ValueError:
+            # Reset to last valid value
+            self.height_var.set(self.core.height)
+    
+    def on_strength_change(self, event=None):
+        """Handle change in strength slider."""
+        strength = round(self.strength_var.get(), 1)
+        self.core.strength = strength
+        
+        # Set dragging state
+        self.slider_dragging = True
+        
+        # Schedule preview update
+        self.schedule_preview_update()
+    
+    def on_strength_entry_change(self):
+        """Handle direct input in strength entry."""
+        try:
+            strength = float(self.strength_var.get())
+            # Constrain to valid range
+            strength = max(1.0, min(10.0, strength))
+            self.strength_var.set(round(strength, 1))
+            self.core.strength = strength
+            
+            # Not dragging when manually entering a value
+            self.slider_dragging = False
+            
+            # Schedule preview update
+            self.schedule_preview_update()
+        except ValueError:
+            # Reset to last valid value
+            self.strength_var.set(self.core.strength)
+    
+    def on_segments_change(self, event=None):
+        """Handle change in segments slider."""
+        # Ensure we're using an integer value
+        segments = int(self.segments_var.get())
+        self.segments_var.set(segments)  # Force integer in the UI
+        self.core.segments = segments
+        
+        # Set dragging state
+        self.slider_dragging = True
+        
+        # For segment changes, we need to clear the preview cache
+        # to force a full regeneration of the height map
+        self.core.preview_size_cache = None
+        self.core.preview_height_map = None
+        
+        # Schedule preview update
+        self.schedule_preview_update()
+    
+    def on_segments_entry_change(self):
+        """Handle direct input in segments entry."""
+        try:
+            segments = int(self.segments_var.get())
+            # Constrain to valid range
+            segments = max(1, min(50, segments))
+            self.segments_var.set(segments)
+            self.core.segments = segments
+            
+            # Not dragging when manually entering a value
+            self.slider_dragging = False
+            
+            # For segment changes, we need to clear the preview cache
+            # to force a full regeneration of the height map
+            self.core.preview_size_cache = None
+            self.core.preview_height_map = None
+            
+            # Schedule preview update
+            self.schedule_preview_update()
+        except ValueError:
+            # Reset to last valid value
+            self.segments_var.set(self.core.segments)
+    
+    def on_segment_ratio_change(self, event=None):
+        """Handle change in segment ratio slider."""
+        ratio = int(self.segment_ratio_var.get())
+        self.core.segment_ratio = ratio
+        
+        # Set dragging state
+        self.slider_dragging = True
+        
+        # Schedule preview update
+        self.schedule_preview_update()
+    
+    def on_segment_ratio_entry_change(self):
+        """Handle direct input in segment ratio entry."""
+        try:
+            ratio = int(self.segment_ratio_var.get())
+            # Constrain to valid range (10-90)
+            ratio = max(10, min(90, ratio))
+            self.segment_ratio_var.set(ratio)
+            self.core.segment_ratio = ratio
+            
+            # Not dragging when manually entering a value
+            self.slider_dragging = False
+            
+            # Schedule preview update
+            self.schedule_preview_update()
+        except ValueError:
+            # Reset to last valid value
+            self.segment_ratio_var.set(self.core.segment_ratio)
+    
+    def on_rotation_change(self, event=None):
+        """Handle change in matcap rotation slider."""
+        rotation = round(self.rotation_var.get())
+        self.core.matcap_rotation = rotation
+        
+        # For rotation changes, we only need to update the matcap rendering,
+        # not regenerate the normal map or height map.
+        if (self.core.normal_image is not None and 
+            self.core.matcap_texture is not None):
+            
+            # Use threading to avoid freezing the UI
+            def update_rotation_thread():
+                try:
+                    # Apply matcap with current rotation
+                    matcap_image = self.core.apply_matcap(
+                        self.core.normal_image, 
+                        rotation,
+                        fast_preview=self.core.use_fast_preview
+                    )
+                    
+                    if matcap_image:
+                        # Update the matcap image in memory
+                        self.core.matcap_image = matcap_image
+                        
+                        # Use after() to update UI from the main thread
+                        self.root.after(10, self.update_matcap_preview)
+                        
+                except Exception as e:
+                    print(f"Error updating matcap rotation: {str(e)}")
+            
+            # Start rotation update in background
+            import threading
+            thread = threading.Thread(target=update_rotation_thread)
+            thread.daemon = True
+            thread.start()
+            
+            # Set status to indicate processing
+            self.status_label.config(text="Status: Updating matcap rotation preview...")
+    
+    def on_rotation_entry_change(self):
+        """Handle direct input in rotation entry."""
+        try:
+            rotation = int(self.rotation_var.get())
+            # Constrain to valid range (0-360)
+            rotation = rotation % 360
+            self.rotation_var.set(rotation)
+            self.core.matcap_rotation = rotation
+            
+            # Update matcap preview
+            if (self.core.normal_image is not None and 
+                self.core.matcap_texture is not None):
+                self.on_rotation_change()
+        except ValueError:
+            # Reset to last valid value
+            self.rotation_var.set(self.core.matcap_rotation)
+    
+    def on_fast_preview_change(self, event=None):
+        """Handle change in fast preview checkbox."""
+        use_fast = self.fast_preview_var.get()
+        self.core.use_fast_preview = use_fast
+        
+        # Update the quality indicator
+        if use_fast:
+            self.preview_quality_label.config(text="(Fast Mode)", foreground="#4296fa")
+        else:
+            self.preview_quality_label.config(text="(High Quality)", foreground="#f44336")
+        
+        # When fast preview is toggled, we should regenerate the preview
+        # using the new quality setting
+        self.status_label.config(text=f"Status: {'Fast preview mode' if use_fast else 'High quality mode'}")
+        
+        # Schedule a refresh to update with new quality setting
+        self.schedule_preview_update()
+    
+    # Button action handlers
+    def on_generate(self):
+        """Handle generate button click."""
+        self.generate_button.config(state=tk.DISABLED)
+        self.save_button.config(state=tk.DISABLED)
+        
+        # Start generation with update callback
+        self.core.generate_maps(self.update_gui)
+    
+    def on_save(self):
+        """Handle save button click."""
+        if self.core.height_map is None or self.core.normal_map is None:
+            return
+        
+        # Ask for file prefix
+        initial_dir = os.path.abspath(OUTPUT_FOLDER)
+        file_prefix = filedialog.asksaveasfilename(
+            initialdir=initial_dir,
+            title="Save Normal Map Images",
+            filetypes=[("PNG files", "*.png")],
+            defaultextension=".png"
+        )
+        
+        if not file_prefix:
+            return
+        
+        # Remove extension if user added one
+        file_prefix = os.path.splitext(file_prefix)[0]
+        
+        # Save images
+        height_file, normal_file = self.core.save_images(file_prefix)
+        
+        if height_file and normal_file:
+            self.status_label.config(text=f"Status: Images saved successfully as {os.path.basename(height_file)} and {os.path.basename(normal_file)}")
+    
+    def on_clean_output(self):
+        """Handle clean output folder button click."""
+        # Ask for confirmation
+        confirm = messagebox.askyesno(
+            "Clean Output Folder", 
+            f"Are you sure you want to delete all files in the {OUTPUT_FOLDER} folder?",
+            icon=messagebox.WARNING
+        )
+        
+        if confirm:
+            result = clean_folder(OUTPUT_FOLDER)
+            if result:
+                self.status_label.config(text=f"Status: Cleaned output folder")
+            else:
+                self.status_label.config(text=f"Status: Error cleaning output folder")
+    
+    def open_output_folder(self):
+        """Open the output folder in the file explorer."""
+        result = open_folder(OUTPUT_FOLDER)
+        if not result:
+            self.status_label.config(text=f"Status: Error opening output folder")
+    
+    def on_closing(self):
+        """Handle window closing event."""
+        # Clean up temp folder if it exists
+        clean_folder(TEMP_FOLDER)
+        
+        # Close the window
+        self.root.destroy()
+    
+    # Preview update methods
+    def update_gui(self):
+        """Update UI with current core state."""
+        # Use a try-except for every UI update to avoid thread issues
+        try:
+            # Update status
+            self.status_label.config(text=f"Status: {self.core.status}")
+            
+            # Enable/disable buttons
+            if self.core.generation_in_progress:
+                self.generate_button.config(state=tk.DISABLED)
+                self.save_button.config(state=tk.DISABLED)
+            else:
+                self.generate_button.config(state=tk.NORMAL)
+                if self.core.height_map is not None and self.core.normal_map is not None:
+                    self.save_button.config(state=tk.NORMAL)
+            
+            # Update each preview separately for better error handling
+            if self.core.height_image is not None:
+                self.update_height_preview()
+            
+            if self.core.normal_image is not None:
+                self.update_normal_preview()
+                
+            if self.core.matcap_image is not None:
+                self.update_matcap_preview()
+                
+            # Update matcap texture preview
+            self.update_matcap_texture_preview()
+        except Exception as e:
+            print(f"Error in update_gui: {e}")
+            # Try to refresh after a short delay
+            self.root.after(100, self.update_gui)
+    
+    def update_height_preview(self):
+        """Update height map preview."""
+        if self.core.height_image is None:
+            return
+            
+        # Get canvas dimensions
+        canvas_width = self.height_canvas.winfo_width()
+        canvas_height = self.height_canvas.winfo_height()
+        
+        if canvas_width < 50:  # Not properly sized yet
+            canvas_width = 300
+            canvas_height = 300
+        
+        # Calculate the display size to maintain aspect ratio
+        display_size = min(canvas_width, canvas_height)
+        
+        # Resize image for display - use BILINEAR instead of LANCZOS for faster UI updates
+        preview_img = self.core.height_image.resize((display_size, display_size), Image.BILINEAR)
+        photo = ImageTk.PhotoImage(preview_img)
+        
+        # Keep reference to avoid garbage collection
+        self.height_preview = photo
+        
+        # Calculate center position
+        center_x = canvas_width // 2
+        center_y = canvas_height // 2
+        
+        # Clear canvas and display centered image
+        self.height_canvas.delete("all")
+        self.height_canvas.create_image(center_x, center_y, anchor=tk.CENTER, image=self.height_preview)
+    
+    def update_normal_preview(self):
+        """Update normal map preview."""
+        if self.core.normal_image is None:
+            return
+            
+        # Get canvas dimensions
+        canvas_width = self.normal_canvas.winfo_width()
+        canvas_height = self.normal_canvas.winfo_height()
+        
+        if canvas_width < 50:  # Not properly sized yet
+            canvas_width = 300
+            canvas_height = 300
+        
+        # Calculate the display size to maintain aspect ratio
+        display_size = min(canvas_width, canvas_height)
+        
+        # Resize image for display
+        preview_img = self.core.normal_image.resize((display_size, display_size), Image.BILINEAR)
+        photo = ImageTk.PhotoImage(preview_img)
+        
+        # Keep reference to avoid garbage collection
+        self.normal_preview = photo
+        
+        # Calculate center position
+        center_x = canvas_width // 2
+        center_y = canvas_height // 2
+        
+        # Clear canvas and display centered image
+        self.normal_canvas.delete("all")
+        self.normal_canvas.create_image(center_x, center_y, anchor=tk.CENTER, image=self.normal_preview)
+    
+    def update_matcap_preview(self):
+        """Update matcap preview."""
+        if self.core.matcap_image is None:
+            return
+            
+        # Get canvas dimensions
+        canvas_width = self.matcap_preview_canvas.winfo_width()
+        canvas_height = self.matcap_preview_canvas.winfo_height()
+        
+        if canvas_width < 50:  # Not properly sized yet
+            canvas_width = 300
+            canvas_height = 300
+        
+        # Calculate the display size to maintain aspect ratio
+        display_size = min(canvas_width, canvas_height)
+        
+        # Resize image for display - use BILINEAR instead of LANCZOS for faster UI updates
+        preview_img = self.core.matcap_image.resize((display_size, display_size), Image.BILINEAR)
+        photo = ImageTk.PhotoImage(preview_img)
+        
+        # Keep reference to avoid garbage collection
+        self.matcap_preview = photo
+        
+        # Calculate center position
+        center_x = canvas_width // 2
+        center_y = canvas_height // 2
+        
+        # Clear canvas and display centered image
+        self.matcap_preview_canvas.delete("all")
+        self.matcap_preview_canvas.create_image(center_x, center_y, anchor=tk.CENTER, image=self.matcap_preview)
+    
+    def update_matcap_texture_preview(self):
+        """Update matcap texture preview."""
+        if self.core.matcap_texture is None:
+            return
+            
+        # Get canvas dimensions
+        canvas_width = self.matcap_texture_canvas.winfo_width()
+        canvas_height = self.matcap_texture_canvas.winfo_height()
+        
+        if canvas_width < 50:  # Not properly sized yet
+            canvas_width = 300
+            canvas_height = 300
+        
+        # Calculate the display size to maintain aspect ratio
+        display_size = min(canvas_width, canvas_height)
+        
+        # Resize image for display - use BILINEAR instead of LANCZOS for faster UI updates
+        preview_img = self.core.matcap_texture.resize((display_size, display_size), Image.BILINEAR)
+        photo = ImageTk.PhotoImage(preview_img)
+        
+        # Keep reference to avoid garbage collection
+        self.matcap_texture_preview = photo
+        
+        # Calculate center position
+        center_x = canvas_width // 2
+        center_y = canvas_height // 2
+        
+        # Clear canvas and display centered image
+        self.matcap_texture_canvas.delete("all")
+        self.matcap_texture_canvas.create_image(center_x, center_y, anchor=tk.CENTER, image=self.matcap_texture_preview)
+    
+    def start_periodic_updates(self):
+        """Start the periodic UI update cycle."""
+        self.root.after(100, self.periodic_update)
+        
+        # Generate an initial preview after UI is fully loaded
+        if not self.core.generation_in_progress:
+            self.root.after(500, lambda: self.core.qguick_update_preview(self.update_gui))
+    
+    def periodic_update(self):
+        """Periodically update the UI."""
+        # Update UI with current core state
+        self.update_gui()
+        
+        # Reschedule
+        self.root.after(100, self.periodic_update)
+    
+    def schedule_preview_update(self):
+        """Schedule a preview update with a delay to avoid too frequent updates."""
+        # Cancel any existing timer
+        if self.update_timer is not None:
+            self.root.after_cancel(self.update_timer)
+        
+        # Use longer delay during slider dragging for better performance
+        delay = SLIDER_DRAG_DELAY if self.slider_dragging else AUTO_REFRESH_DELAY
+        
+        # Create a new timer
+        self.update_timer = self.root.after(delay, self.on_delayed_update)
+    
+    def on_delayed_update(self):
+        """Called after delay to update preview."""
+        if not self.core.generation_in_progress:
+            # Pass the slider_dragging flag to use appropriate preview scaling
+            self.core.qguick_update_preview(
+                update_callback=self.update_gui,
+                is_dragging=self.slider_dragging
+            )
+            
+        # Reset the dragging flag after update
+        self.slider_dragging = False
+    
+    def create_stacked_preview_canvases(self, parent):
+        """Create canvas widgets for displaying the stacked cone previews."""
+        # Set up image preview area - 2x2 grid
+        preview_frame = ttk.Frame(parent)
+        preview_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Create a grid for the previews
+        preview_grid = ttk.Frame(preview_frame)
+        preview_grid.pack(fill=tk.BOTH, expand=True)
+        
+        # Row 1: Height Map and Normal Map
+        height_frame = ttk.Frame(preview_grid)
+        height_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        
+        normal_frame = ttk.Frame(preview_grid)
+        normal_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+        
+        # Row 2: Matcap Preview and Matcap Texture
+        matcap_preview_frame = ttk.Frame(preview_grid)
+        matcap_preview_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        
+        matcap_texture_frame = ttk.Frame(preview_grid)
+        matcap_texture_frame.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
+        
+        # Configure the grid to expand properly
+        preview_grid.columnconfigure(0, weight=1)
+        preview_grid.columnconfigure(1, weight=1)
+        preview_grid.rowconfigure(0, weight=1)
+        preview_grid.rowconfigure(1, weight=1)
+        
+        # Height map preview
+        ttk.Label(height_frame, text="Stacked Height Map", font=("Arial", 12)).pack(pady=(0, 5))
+        self.stacked_height_canvas = tk.Canvas(height_frame, bg=DarkModeTheme.DARK_BG, highlightthickness=1, highlightbackground=DarkModeTheme.BORDER)
+        self.stacked_height_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Normal map preview
+        ttk.Label(normal_frame, text="Stacked Normal Map", font=("Arial", 12)).pack(pady=(0, 5))
+        self.stacked_normal_canvas = tk.Canvas(normal_frame, bg=DarkModeTheme.DARK_BG, highlightthickness=1, highlightbackground=DarkModeTheme.BORDER)
+        self.stacked_normal_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Matcap preview
+        ttk.Label(matcap_preview_frame, text="Stacked Matcap Preview", font=("Arial", 12)).pack(pady=(0, 5))
+        self.stacked_matcap_preview_canvas = tk.Canvas(matcap_preview_frame, bg=DarkModeTheme.DARK_BG, highlightthickness=1, highlightbackground=DarkModeTheme.BORDER)
+        self.stacked_matcap_preview_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Pattern illustration
+        ttk.Label(matcap_texture_frame, text="Stacking Pattern", font=("Arial", 12)).pack(pady=(0, 5))
+        self.stacking_pattern_canvas = tk.Canvas(matcap_texture_frame, bg=DarkModeTheme.DARK_BG, highlightthickness=1, highlightbackground=DarkModeTheme.BORDER)
+        self.stacking_pattern_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Add text to the canvas showing it's a placeholder until we implement the actual rendering
+        for canvas in [self.stacked_height_canvas, self.stacked_normal_canvas, self.stacked_matcap_preview_canvas, self.stacking_pattern_canvas]:
+            canvas.create_text(
+                200, 200, 
+                text="Stacked Cones Preview\n(Coming soon)", 
+                fill=DarkModeTheme.TEXT,
+                font=("Arial", 14),
+                justify=tk.CENTER
+            )
+    
+    def on_stacked_generate(self):
+        """Handle generate button click for stacked cones."""
+        self.stacked_status_label.config(text="Status: Stacked cone generation is not yet implemented")
+        
+        # Draw a simple representation of stacked cones on the pattern canvas
+        self.draw_stacked_cones_pattern()
+    
+    def on_stacked_save(self):
+        """Handle save button click for stacked cones."""
+        messagebox.showinfo("Not Implemented", "Saving stacked cone images is not yet implemented")
+    
+    def draw_stacked_cones_pattern(self):
+        """Draw a simple representation of the stacked cones pattern."""
+        # Clear canvas
+        self.stacking_pattern_canvas.delete("all")
+        
+        # Get canvas dimensions
+        canvas_width = self.stacking_pattern_canvas.winfo_width()
+        canvas_height = self.stacking_pattern_canvas.winfo_height()
+        
+        if canvas_width < 50:  # Not properly sized yet
+            canvas_width = 300
+            canvas_height = 300
+        
+        # Parameters for drawing
+        num_cones = self.num_cones_var.get()
+        angle_rad = math.radians(self.angle_var.get())
+        spacing_factor = self.spacing_var.get() / 100.0
+        fade_factor = self.fade_var.get()
+        
+        # Starting position (center of first cone)
+        center_x = canvas_width * 0.3
+        center_y = canvas_height * 0.5
+        
+        # Base radius for visualization
+        base_radius = min(canvas_width, canvas_height) * 0.15
+        
+        # Draw cones
+        for i in range(num_cones):
+            # Calculate size and opacity based on fade factor
+            current_radius = base_radius * (fade_factor ** i)
+            opacity = int(255 * (fade_factor ** i))
+            
+            # Calculate center position for this cone
+            x = center_x + i * spacing_factor * canvas_width * math.cos(angle_rad)
+            y = center_y + i * spacing_factor * canvas_width * math.sin(angle_rad)
+            
+            # Create color with opacity
+            color = f"#{opacity:02x}{opacity:02x}{opacity:02x}"
+            
+            # Draw circle representing cone
+            self.stacking_pattern_canvas.create_oval(
+                x - current_radius, y - current_radius,
+                x + current_radius, y + current_radius,
+                fill=color, outline="#ffffff"
+            )
+            
+            # Draw number label
+            self.stacking_pattern_canvas.create_text(
+                x, y, 
+                text=str(i+1), 
+                fill="#ffffff",
+                font=("Arial", max(int(10 * (fade_factor ** i)), 8))
+            
+            # Draw arrow to next cone if this isn't the last cone
+            if i < num_cones - 1:
+                next_x = center_x + (i+1) * spacing_factor * canvas_width * math.cos(angle_rad)
+                next_y = center_y + (i+1) * spacing_factor * canvas_width * math.sin(angle_rad)
+                
+                self.stacking_pattern_canvas.create_line(
+                    x + current_radius * 0.7 * math.cos(angle_rad),
+                    y + current_radius * 0.7 * math.sin(angle_rad),
+                    next_x - base_radius * (fade_factor ** (i+1)) * 0.7 * math.cos(angle_rad),
+                    next_y - base_radius * (fade_factor ** (i+1)) * 0.7 * math.sin(angle_rad),
+                    fill="#4296fa", width=2, arrow=tk.LAST
+                )
+        
+        # Add legend
+        self.stacking_pattern_canvas.create_text(
+            canvas_width * 0.8,
+            canvas_height * 0.1,
+            text=f"Stacked Cones: {num_cones}\nDirection: {self.angle_var.get()}°\nSpacing: {self.spacing_var.get()}%\nFade: {self.fade_var.get()}",
+            fill=DarkModeTheme.TEXT,
+            font=("Arial", 10),
+            anchor=tk.NE,
+            justify=tk.RIGHT
+        )
+        
+        # Update status
+        self.stacked_status_label.config(text=f"Status: Pattern visualization updated with {num_cones} cones")
+    
+    def on_stacked_parameter_change(self):
+        """Handle changes to any of the stacked cone parameters."""
+        # Update the pattern visualization
+        self.draw_stacked_cones_pattern()
+        
+        # Schedule a refresh to update with new pattern
+        self.schedule_preview_update() 
